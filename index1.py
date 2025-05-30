@@ -8,14 +8,9 @@ import datetime
 import time
 import plotly.express as px
 import plotly.graph_objects as go
-import tempfile
-import threading
 import io
 import re
 import base64
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import db
 
 # Set page configuration
 st.set_page_config(
@@ -24,41 +19,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Initialize Firebase with credentials from Streamlit secrets
-try:
-    if not firebase_admin._apps:
-        # Check if running on Streamlit Cloud (secrets available)
-        if hasattr(st, 'secrets') and 'firebase' in st.secrets:
-            # Use Streamlit secrets
-            firebase_config = dict(st.secrets["firebase"])
-            cred = credentials.Certificate(firebase_config)
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://ledger-system-22ef6-default-rtdb.asia-southeast1.firebasedatabase.app/'
-            })
-            using_firebase = True
-            firebase_db = db.reference('/')
-            st.sidebar.success("Connected to Firebase via Streamlit Secrets")
-        else:
-            # Fallback to local file for development
-            cred_path = "ledger-system-22ef6-firebase-adminsdk-fbsvc-695bef6eb3.json"
-            if os.path.exists(cred_path):
-                cred = credentials.Certificate(cred_path)
-                firebase_admin.initialize_app(cred, {
-                    'databaseURL': 'https://ledger-system-22ef6-default-rtdb.asia-southeast1.firebasedatabase.app/'
-                })
-                using_firebase = True
-                firebase_db = db.reference('/')
-                st.sidebar.info("Connected to Firebase via local credentials")
-            else:
-                st.sidebar.warning("Firebase credentials not found. Using local storage.")
-                using_firebase = False
-    else:
-        using_firebase = True
-        firebase_db = db.reference('/')
-except Exception as e:
-    st.sidebar.error(f"Firebase initialization error: {e}")
-    using_firebase = False
 
 # File paths for local storage
 DATA_DIR = "data"
@@ -76,7 +36,7 @@ os.makedirs(SUPPLIER_TRANSACTIONS_DIR, exist_ok=True)
 # Initialize session state variables
 if 'settings' not in st.session_state:
     st.session_state.settings = {
-        "theme": "light",
+        "theme": "dark",
         "auto_backup": True,
         "auto_calculate_balance": True,
         "date_format": "%Y-%m-%d",
@@ -85,10 +45,6 @@ if 'settings' not in st.session_state:
         "auto_save_interval": 5,
         "auto_date_format": True
     }
-else:
-    # Ensure currency_symbol exists in settings
-    if "currency_symbol" not in st.session_state.settings:
-        st.session_state.settings["currency_symbol"] = "₹"
 
 if 'current_customer' not in st.session_state:
     st.session_state.current_customer = None
@@ -104,497 +60,134 @@ if 'confirm_delete_customer' not in st.session_state:
     st.session_state.confirm_delete_customer = None
 if 'confirm_delete_supplier' not in st.session_state:
     st.session_state.confirm_delete_supplier = None
-if 'last_refresh' not in st.session_state:
-    st.session_state.last_refresh = time.time()
 
-# Custom DateEntry class for automatic date formatting
-class DateEntry:
-    """
-    A custom date entry component that automatically adds dashes as the user types.
-    """
-    def __init__(self, label, key, value="", help="Format: YYYY-MM-DD"):
-        self.label = label
-        self.key = key
-        self.value = value
-        self.help = help
-        
-    def render(self):
-        # Get the current value from session state if it exists
-        current_value = st.session_state.get(self.key, self.value)
-        
-        # Create the text input
-        date_input = st.text_input(
-            self.label,
-            value=current_value,
-            key=self.key,
-            help=self.help
-        )
-        
-        # Auto-complete the date by adding dashes
-        if date_input and len(date_input) != len(current_value):
-            # Remove any existing dashes
-            clean_date = date_input.replace("-", "").replace("/", "")
-            
-            # Format as YYYY-MM-DD
-            if len(clean_date) >= 8:
-                formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:8]}"
-            elif len(clean_date) >= 6:
-                formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-"
-            elif len(clean_date) >= 4:
-                formatted_date = f"{clean_date[:4]}-"
-            else:
-                formatted_date = clean_date
-            
-            # Update the value in session state if it changed
-            if formatted_date != date_input:
-                st.session_state[self.key] = formatted_date
-                # Use rerun to update the UI with the formatted date
-                st.rerun()
-        
-        return date_input
-
-# Apply theme
+# Apply dark theme
 def apply_theme():
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    /* Root variables for consistent theming */
-    :root {
-        --bg-primary: #0f1419;
-        --bg-secondary: #1a1f2e;
-        --bg-tertiary: #252b3b;
-        --text-primary: #ffffff;
-        --text-secondary: #b8c5d6;
-        --text-muted: #8892a6;
-        --accent-primary: #3b82f6;
-        --accent-secondary: #6366f1;
-        --border-color: #374151;
-        --success: #10b981;
-        --warning: #f59e0b;
-        --error: #ef4444;
-        --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        --radius: 8px;
-        --radius-sm: 4px;
-        --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    /* Base elements */
+    .stApp, .stTabs, .main {
+        background-color: #121212 !important;
+        color: #FFFFFF !important;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
     
-    /* Base styling */
-    .stApp {
-        background: linear-gradient(135deg, var(--bg-primary) 0%, #0a0e1a 100%);
-        color: var(--text-primary);
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        line-height: 1.6;
+    /* Headers */
+    h1, h2, h3 {
+        color: #BB86FC !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.5px !important;
     }
     
-    /* Typography */
-    h1, h2, h3, h4, h5, h6 {
-        color: var(--text-primary) !important;
+    h4, h5, h6 {
+        color: #FFFFFF !important;
         font-weight: 600 !important;
-        letter-spacing: -0.025em !important;
-        margin-bottom: 0.5rem !important;
-    }
-    
-    h1 { font-size: 2.25rem !important; }
-    h2 { font-size: 1.875rem !important; }
-    h3 { font-size: 1.5rem !important; }
-    
-    p, div, span {
-        color: var(--text-secondary);
     }
     
     /* Buttons */
-    .stButton > button {
-        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) !important;
-        color: var(--text-primary) !important;
-        border: none !important;
-        border-radius: var(--radius) !important;
-        padding: 0.75rem 1.5rem !important;
-        font-weight: 500 !important;
-        font-size: 0.875rem !important;
-        transition: var(--transition) !important;
-        box-shadow: var(--shadow) !important;
-        cursor: pointer !important;
+    .stButton>button {
+        background-color: #BB86FC !important;
+        color: #FFFFFF !important;
+        border-radius: 5px !important;
+        font-weight: bold !important;
+        border: 1px solid #BB86FC !important;
+        padding: 0.5rem 1rem !important;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3) !important;
+        transition: all 0.3s ease !important;
     }
-    
-    .stButton > button:hover {
-        transform: translateY(-1px) !important;
-        box-shadow: var(--shadow-lg) !important;
-        background: linear-gradient(135deg, #2563eb, #4f46e5) !important;
-    }
-    
-    .stButton > button:active {
-        transform: translateY(0) !important;
+    .stButton>button:hover {
+        background-color: #9965F4 !important;
+        border-color: #9965F4 !important;
+        box-shadow: 0 3px 8px rgba(0,0,0,0.4) !important;
     }
     
     /* Input fields */
-    .stTextInput > div > div > input,
-    .stNumberInput > div > div > input,
-    .stSelectbox > div > div > div,
-    .stTextArea > div > div > textarea {
-        background-color: var(--bg-secondary) !important;
-        color: var(--text-primary) !important;
-        border: 1px solid var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        padding: 0.75rem !important;
-        font-size: 0.875rem !important;
-        transition: var(--transition) !important;
-        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+    .stTextInput>div>div>input, .stSelectbox>div>div>div, .stNumberInput>div>div>input, .stDateInput>div>div>input {
+        background-color: #1E1E1E !important;
+        color: #FFFFFF !important;
+        border: 1px solid #2C2C2C !important;
+        border-radius: 4px !important;
+        padding: 0.5rem !important;
     }
     
-    .stTextInput > div > div > input:focus,
-    .stNumberInput > div > div > input:focus,
-    .stSelectbox > div > div > div:focus,
-    .stTextArea > div > div > textarea:focus {
-        border-color: var(--accent-primary) !important;
-        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
-        outline: none !important;
+    .stTextInput>div>div>input:focus, .stSelectbox>div>div>div:focus, .stNumberInput>div>div>input:focus {
+        border-color: #BB86FC !important;
+        box-shadow: 0 0 0 2px rgba(187, 134, 252, 0.3) !important;
     }
     
-    /* Labels */
-    .stTextInput > div > label,
-    .stNumberInput > div > label,
-    .stSelectbox > div > label,
-    .stTextArea > div > label {
-        color: var(--text-secondary) !important;
-        font-weight: 500 !important;
-        font-size: 0.875rem !important;
-        margin-bottom: 0.5rem !important;
-    }
-    
-    /* Cards and containers */
-    .stForm {
-        background: var(--bg-secondary) !important;
-        border: 1px solid var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        padding: 2rem !important;
-        box-shadow: var(--shadow) !important;
-        backdrop-filter: blur(10px) !important;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary)) !important;
-        border: 1px solid var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        padding: 1.5rem !important;
-        margin-bottom: 1rem !important;
-        box-shadow: var(--shadow) !important;
-        transition: var(--transition) !important;
-        position: relative !important;
-        overflow: hidden !important;
-    }
-    
-    .metric-card::before {
-        content: '' !important;
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
-        height: 3px !important;
-        background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary)) !important;
-    }
-    
-    .metric-card:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: var(--shadow-lg) !important;
-        border-color: var(--accent-primary) !important;
-    }
-    
-    .metric-value {
-        font-size: 2rem !important;
-        font-weight: 700 !important;
-        color: var(--text-primary) !important;
-        margin-bottom: 0.25rem !important;
-    }
-    
-    .metric-label {
-        font-size: 0.875rem !important;
-        color: var(--text-muted) !important;
-        font-weight: 500 !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.05em !important;
+    /* Text areas */
+    .stTextArea>div>div>textarea {
+        background-color: #1E1E1E !important;
+        color: #FFFFFF !important;
+        border: 1px solid #2C2C2C !important;
+        border-radius: 4px !important;
     }
     
     /* DataFrames */
     .stDataFrame {
-        background: var(--bg-secondary) !important;
-        border: 1px solid var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        overflow: hidden !important;
-        box-shadow: var(--shadow) !important;
+        background-color: #1E1E1E !important;
+        border: 1px solid #2C2C2C !important;
+        border-radius: 8px !important;
     }
     
-    .stDataFrame th {
-        background: linear-gradient(135deg, var(--bg-tertiary), var(--bg-secondary)) !important;
-        color: var(--text-primary) !important;
-        font-weight: 600 !important;
-        padding: 1rem !important;
-        border-bottom: 2px solid var(--border-color) !important;
+    /* Metric cards */
+    .metric-card {
+        background: #1E1E1E !important;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3) !important;
+        border-radius: 8px !important;
+        padding: 1.2rem !important;
+        margin-bottom: 1rem !important;
+        border: 1px solid #2C2C2C !important;
+        transition: transform 0.3s ease !important;
     }
-    
-    .stDataFrame td {
-        background: var(--bg-secondary) !important;
-        color: var(--text-secondary) !important;
-        padding: 0.75rem 1rem !important;
-        border-bottom: 1px solid var(--border-color) !important;
+    .metric-card:hover {
+        transform: translateY(-5px) !important;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.4) !important;
+        border-color: #BB86FC !important;
     }
-    
-    .stDataFrame tr:hover td {
-        background: var(--bg-tertiary) !important;
+    .metric-value {
+        font-size: 28px !important;
+        font-weight: bold !important;
+        color: #BB86FC !important;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.3) !important;
     }
-    
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        background: var(--bg-secondary) !important;
-        border-radius: var(--radius) !important;
-        padding: 0.25rem !important;
-        border: 1px solid var(--border-color) !important;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        background: transparent !important;
-        color: var(--text-muted) !important;
-        border-radius: var(--radius-sm) !important;
-        padding: 0.75rem 1.5rem !important;
+    .metric-label {
+        font-size: 16px !important;
+        color: #B0B0B0 !important;
         font-weight: 500 !important;
-        transition: var(--transition) !important;
-        margin: 0 0.125rem !important;
     }
     
-    .stTabs [data-baseweb="tab"]:hover {
-        background: var(--bg-tertiary) !important;
-        color: var(--text-secondary) !important;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) !important;
-        color: var(--text-primary) !important;
-        box-shadow: var(--shadow) !important;
+    /* Forms */
+    .stForm {
+        background-color: #1E1E1E !important;
+        padding: 25px !important;
+        border-radius: 10px !important;
+        border: 1px solid #2C2C2C !important;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2) !important;
     }
     
     /* Sidebar */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%) !important;
-        border-right: 1px solid var(--border-color) !important;
+        background-color: #1E1E1E !important;
+        border-right: 1px solid #2C2C2C !important;
     }
     
-    [data-testid="stSidebar"] .stButton > button {
-        width: 100% !important;
-        margin-bottom: 0.5rem !important;
-        justify-content: flex-start !important;
-    }
-    
-    /* Expanders */
-    .streamlit-expanderHeader {
-        background: var(--bg-secondary) !important;
-        color: var(--text-primary) !important;
-        border: 1px solid var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        padding: 1rem !important;
+    /* Labels */
+    .stTextInput>div>label, .stSelectbox>div>label, .stNumberInput>div>label, 
+    .stTextArea>div>label, .stDateInput>div>label {
+        color: #FFFFFF !important;
         font-weight: 500 !important;
-        transition: var(--transition) !important;
-    }
-    
-    .streamlit-expanderHeader:hover {
-        background: var(--bg-tertiary) !important;
-        border-color: var(--accent-primary) !important;
-    }
-    
-    .streamlit-expanderContent {
-        background: var(--bg-secondary) !important;
-        border: 1px solid var(--border-color) !important;
-        border-top: none !important;
-        border-radius: 0 0 var(--radius) var(--radius) !important;
-        padding: 1.5rem !important;
-    }
-    
-    /* Status messages */
-    .stSuccess {
-        background: rgba(16, 185, 129, 0.1) !important;
-        border: 1px solid var(--success) !important;
-        border-radius: var(--radius) !important;
-        color: var(--success) !important;
-    }
-    
-    .stError {
-        background: rgba(239, 68, 68, 0.1) !important;
-        border: 1px solid var(--error) !important;
-        border-radius: var(--radius) !important;
-        color: var(--error) !important;
-    }
-    
-    .stWarning {
-        background: rgba(245, 158, 11, 0.1) !important;
-        border: 1px solid var(--warning) !important;
-        border-radius: var(--radius) !important;
-        color: var(--warning) !important;
-    }
-    
-    .stInfo {
-        background: rgba(59, 130, 246, 0.1) !important;
-        border: 1px solid var(--accent-primary) !important;
-        border-radius: var(--radius) !important;
-        color: var(--accent-primary) !important;
-    }
-    
-    /* Checkboxes and radio buttons */
-    .stCheckbox > div > label,
-    .stRadio > div > div > div > label {
-        color: var(--text-secondary) !important;
-        font-weight: 500 !important;
-    }
-    
-    /* File uploader */
-    .stFileUploader > div > div {
-        background: var(--bg-secondary) !important;
-        border: 2px dashed var(--border-color) !important;
-        border-radius: var(--radius) !important;
-        padding: 2rem !important;
-        transition: var(--transition) !important;
-    }
-    
-    .stFileUploader > div > div:hover {
-        border-color: var(--accent-primary) !important;
-        background: var(--bg-tertiary) !important;
-    }
-    
-    /* Progress bars */
-    .stProgress > div > div {
-        background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary)) !important;
-        border-radius: var(--radius) !important;
-    }
-    
-    /* Scrollbars */
-    ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-    }
-    
-    ::-webkit-scrollbar-track {
-        background: var(--bg-primary);
-        border-radius: var(--radius-sm);
-    }
-    
-    ::-webkit-scrollbar-thumb {
-        background: var(--border-color);
-        border-radius: var(--radius-sm);
-        transition: var(--transition);
-    }
-    
-    ::-webkit-scrollbar-thumb:hover {
-        background: var(--accent-primary);
-    }
-    
-    /* Custom animations */
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
-    .stApp > div {
-        animation: fadeIn 0.3s ease-out;
-    }
-    
-    /* Responsive design */
-    @media (max-width: 768px) {
-        .stForm {
-            padding: 1rem !important;
-        }
-        
-        .metric-card {
-            padding: 1rem !important;
-        }
-        
-        .metric-value {
-            font-size: 1.5rem !important;
-        }
     }
     </style>
     """, unsafe_allow_html=True)
 
-
-
-
-
 apply_theme()
 
-# Custom CSS for layout
-st.markdown("""
-<style>
-.card {
-    padding: 20px;
-    border-radius: 10px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    margin-bottom: 20px;
-}
-.metric-card {
-    text-align: center;
-    padding: 15px;
-    border-radius: 8px;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-}
-.metric-value {
-    font-size: 28px;
-    font-weight: bold;
-}
-.metric-label {
-    font-size: 16px;
-    color: #666;
-}
-.success-message {
-    padding: 10px;
-    background-color: #E8F5E9;
-    border-left: 5px solid #4CAF50;
-    margin-bottom: 10px;
-}
-.warning-message {
-    padding: 10px;
-    background-color: #FFF8E1;
-    border-left: 5px solid #FFC107;
-    margin-bottom: 10px;
-}
-.error-message {
-    padding: 10px;
-    background-color: #FFEBEE;
-    border-left: 5px solid #F44336;
-    margin-bottom: 10px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Function to save Excel file
-def save_excel_file(dataframe, default_filename="ledger_export.xlsx"):
-    """
-    Save dataframe as Excel file using Streamlit's download button
-    instead of tkinter dialog
-    """
-    # Create a BytesIO object
-    buffer = io.BytesIO()
-    
-    # Write the Excel file to the buffer
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        dataframe.to_excel(writer, index=False)
-    
-    # Get the value of the buffer
-    excel_data = buffer.getvalue()
-    
-    # Create a download button
-    st.download_button(
-        label="Download Excel File",
-        data=excel_data,
-        file_name=default_filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    
-    return True
-
-# Format currency
+# Utility functions
 def format_currency(amount):
     currency_symbol = st.session_state.settings["currency_symbol"]
     return f"{currency_symbol}{amount:,.2f}"
 
-# Format date
 def format_date(date_str):
     try:
         date_format = st.session_state.settings["date_format"]
@@ -603,25 +196,6 @@ def format_date(date_str):
     except:
         return date_str
 
-# Helper function to construct transaction date string with separators
-def format_date_input(date_str):
-    if not date_str:
-        return ""
-    
-    # Remove any existing dashes or slashes
-    clean_date = date_str.replace("-", "").replace("/", "")
-    
-    # Format as YYYY-MM-DD
-    if len(clean_date) >= 8:
-        return f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:8]}"
-    elif len(clean_date) >= 6:
-        return f"{clean_date[:4]}-{clean_date[4:6]}-"
-    elif len(clean_date) >= 4:
-        return f"{clean_date[:4]}-"
-    else:
-        return clean_date
-
-# Validate date format
 def validate_date(date_str):
     pattern = r'^\d{4}-\d{2}-\d{2}$'
     if not re.match(pattern, date_str):
@@ -633,54 +207,23 @@ def validate_date(date_str):
     except ValueError:
         return False
 
-# Firebase data functions
+def calculate_balance(transactions_list):
+    balance = 0
+    for transaction in transactions_list:
+        debit = float(transaction.get('debit', 0))
+        credit = float(transaction.get('credit', 0))
+        balance += credit - debit
+    return balance
+
+# Data management functions
 def load_settings():
-    if using_firebase:
-        try:
-            settings_ref = firebase_db.child("settings")
-            settings = settings_ref.get()
-            if not settings:
-                # Default settings
-                settings = {
-                    "theme": "light",
-                    "auto_backup": True,
-                    "auto_calculate_balance": True,
-                    "date_format": "%Y-%m-%d",
-                    "currency_symbol": "₹",
-                    "notification_enabled": True,
-                    "auto_save_interval": 5,
-                    "auto_date_format": True
-                }
-                settings_ref.set(settings)
-            else:
-                # Ensure all required keys exist
-                required_keys = {
-                    "theme": "light",
-                    "auto_backup": True,
-                    "auto_calculate_balance": True,
-                    "date_format": "%Y-%m-%d",
-                    "currency_symbol": "₹",
-                    "notification_enabled": True,
-                    "auto_save_interval": 5,
-                    "auto_date_format": True
-                }
-                for key, default_value in required_keys.items():
-                    if key not in settings:
-                        settings[key] = default_value
-            
-            return settings
-        except Exception as e:
-            st.error(f"Error loading settings from Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r') as f:
                 settings = json.load(f)
-                
                 # Ensure all required keys exist
                 required_keys = {
-                    "theme": "light",
+                    "theme": "dark",
                     "auto_backup": True,
                     "auto_calculate_balance": True,
                     "date_format": "%Y-%m-%d",
@@ -692,14 +235,13 @@ def load_settings():
                 for key, default_value in required_keys.items():
                     if key not in settings:
                         settings[key] = default_value
-                
                 return settings
     except Exception as e:
-        st.error(f"Error loading settings from local storage: {e}")
+        st.error(f"Error loading settings: {e}")
     
-    # Default settings if all else fails
+    # Default settings
     return {
-        "theme": "light",
+        "theme": "dark",
         "auto_backup": True,
         "auto_calculate_balance": True,
         "date_format": "%Y-%m-%d",
@@ -710,51 +252,24 @@ def load_settings():
     }
 
 def save_settings(settings_data):
-    if using_firebase:
-        try:
-            firebase_db.child("settings").set(settings_data)
-            return True
-        except Exception as e:
-            st.error(f"Error saving settings to Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(settings_data, f, indent=2)
         return True
     except Exception as e:
-        st.error(f"Error saving settings locally: {e}")
+        st.error(f"Error saving settings: {e}")
         return False
 
 def load_customers():
-    if using_firebase:
-        try:
-            customers = firebase_db.child("customers").get()
-            if customers:
-                return customers
-            return {}
-        except Exception as e:
-            st.error(f"Error loading customers from Firebase: {e}")
-    
-    # Fallback to local storage
-    if os.path.exists(CUSTOMERS_FILE):
-        try:
+    try:
+        if os.path.exists(CUSTOMERS_FILE):
             with open(CUSTOMERS_FILE, 'r') as f:
                 return json.load(f)
-        except:
-            pass
-    
+    except Exception as e:
+        st.error(f"Error loading customers: {e}")
     return {}
 
 def save_customer(customer_id, customer_data):
-    if using_firebase:
-        try:
-            firebase_db.child("customers").child(customer_id).set(customer_data)
-            return True
-        except Exception as e:
-            st.error(f"Error saving customer to Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         customers = load_customers()
         customers[customer_id] = customer_data
@@ -762,19 +277,10 @@ def save_customer(customer_id, customer_data):
             json.dump(customers, f, indent=2)
         return True
     except Exception as e:
-        st.error(f"Error saving customer locally: {e}")
+        st.error(f"Error saving customer: {e}")
         return False
 
 def delete_customer(customer_id):
-    if using_firebase:
-        try:
-            firebase_db.child("customers").child(customer_id).delete()
-            firebase_db.child("customer_transactions").child(customer_id).delete()
-            return True
-        except Exception as e:
-            st.error(f"Error deleting customer from Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         customers = load_customers()
         if customer_id in customers:
@@ -789,38 +295,19 @@ def delete_customer(customer_id):
             
             return True
     except Exception as e:
-        st.error(f"Error deleting customer locally: {e}")
+        st.error(f"Error deleting customer: {e}")
         return False
 
 def load_suppliers():
-    if using_firebase:
-        try:
-            suppliers = firebase_db.child("suppliers").get()
-            if suppliers:
-                return suppliers
-            return {}
-        except Exception as e:
-            st.error(f"Error loading suppliers from Firebase: {e}")
-    
-    # Fallback to local storage
-    if os.path.exists(SUPPLIERS_FILE):
-        try:
+    try:
+        if os.path.exists(SUPPLIERS_FILE):
             with open(SUPPLIERS_FILE, 'r') as f:
                 return json.load(f)
-        except:
-            pass
-    
+    except Exception as e:
+        st.error(f"Error loading suppliers: {e}")
     return {}
 
 def save_supplier(supplier_id, supplier_data):
-    if using_firebase:
-        try:
-            firebase_db.child("suppliers").child(supplier_id).set(supplier_data)
-            return True
-        except Exception as e:
-            st.error(f"Error saving supplier to Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         suppliers = load_suppliers()
         suppliers[supplier_id] = supplier_data
@@ -828,19 +315,10 @@ def save_supplier(supplier_id, supplier_data):
             json.dump(suppliers, f, indent=2)
         return True
     except Exception as e:
-        st.error(f"Error saving supplier locally: {e}")
+        st.error(f"Error saving supplier: {e}")
         return False
 
 def delete_supplier(supplier_id):
-    if using_firebase:
-        try:
-            firebase_db.child("suppliers").child(supplier_id).delete()
-            firebase_db.child("supplier_transactions").child(supplier_id).delete()
-            return True
-        except Exception as e:
-            st.error(f"Error deleting supplier from Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         suppliers = load_suppliers()
         if supplier_id in suppliers:
@@ -855,43 +333,24 @@ def delete_supplier(supplier_id):
             
             return True
     except Exception as e:
-        st.error(f"Error deleting supplier locally: {e}")
+        st.error(f"Error deleting supplier: {e}")
         return False
 
 def load_transactions(entity_type, entity_id):
-    if using_firebase:
-        try:
-            transactions = firebase_db.child(f"{entity_type}_transactions").child(entity_id).get()
-            if transactions:
-                return transactions
-            return {}
-        except Exception as e:
-            st.error(f"Error loading transactions from Firebase: {e}")
-    
-    # Fallback to local storage
-    trans_file = os.path.join(
-        CUSTOMER_TRANSACTIONS_DIR if entity_type == "customer" else SUPPLIER_TRANSACTIONS_DIR,
-        f"{entity_id}.json"
-    )
-    
-    if os.path.exists(trans_file):
-        try:
+    try:
+        trans_file = os.path.join(
+            CUSTOMER_TRANSACTIONS_DIR if entity_type == "customer" else SUPPLIER_TRANSACTIONS_DIR,
+            f"{entity_id}.json"
+        )
+        
+        if os.path.exists(trans_file):
             with open(trans_file, 'r') as f:
                 return json.load(f)
-        except:
-            pass
-    
+    except Exception as e:
+        st.error(f"Error loading transactions: {e}")
     return {}
 
 def save_transaction(entity_type, entity_id, transaction_id, transaction_data):
-    if using_firebase:
-        try:
-            firebase_db.child(f"{entity_type}_transactions").child(entity_id).child(transaction_id).set(transaction_data)
-            return True
-        except Exception as e:
-            st.error(f"Error saving transaction to Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         trans_file = os.path.join(
             CUSTOMER_TRANSACTIONS_DIR if entity_type == "customer" else SUPPLIER_TRANSACTIONS_DIR,
@@ -910,18 +369,10 @@ def save_transaction(entity_type, entity_id, transaction_id, transaction_data):
         
         return True
     except Exception as e:
-        st.error(f"Error saving transaction locally: {e}")
+        st.error(f"Error saving transaction: {e}")
         return False
 
 def delete_transaction(entity_type, entity_id, transaction_id):
-    if using_firebase:
-        try:
-            firebase_db.child(f"{entity_type}_transactions").child(entity_id).child(transaction_id).delete()
-            return True
-        except Exception as e:
-            st.error(f"Error deleting transaction from Firebase: {e}")
-    
-    # Fallback to local storage
     try:
         trans_file = os.path.join(
             CUSTOMER_TRANSACTIONS_DIR if entity_type == "customer" else SUPPLIER_TRANSACTIONS_DIR,
@@ -940,16 +391,27 @@ def delete_transaction(entity_type, entity_id, transaction_id):
                 
                 return True
     except Exception as e:
-        st.error(f"Error deleting transaction locally: {e}")
+        st.error(f"Error deleting transaction: {e}")
         return False
 
-def calculate_balance(transactions_list):
-    balance = 0
-    for transaction in transactions_list:
-        debit = float(transaction.get('debit', 0))
-        credit = float(transaction.get('credit', 0))
-        balance += credit - debit
-    return balance
+
+def save_excel_file(dataframe, default_filename="ledger_export.xlsx"):
+    """Save dataframe as Excel file"""
+    buffer = io.BytesIO()
+    
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        dataframe.to_excel(writer, index=False)
+    
+    excel_data = buffer.getvalue()
+    
+    st.download_button(
+        label="📥 Download Excel File",
+        data=excel_data,
+        file_name=default_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    
+    return True
 
 # Load settings at startup
 st.session_state.settings = load_settings()
@@ -957,12 +419,26 @@ st.session_state.settings = load_settings()
 # Main app title
 st.title("📒 Ledger Management System")
 
+# Sidebar status
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 System Status")
+st.sidebar.markdown("💾 **Storage:** Local Files")
+st.sidebar.markdown("📱 **Mode:** Offline")
+
+try:
+    customers_count = len(load_customers())
+    suppliers_count = len(load_suppliers())
+    st.sidebar.markdown(f"👥 **Customers:** {customers_count}")
+    st.sidebar.markdown(f"🏢 **Suppliers:** {suppliers_count}")
+except:
+    st.sidebar.markdown("📊 **Data:** Loading...")
+
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Customers", "Suppliers", "Settings"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "👥 Customers", "🏢 Suppliers", "⚙️ Settings"])
 
 # Dashboard Tab
 with tab1:
-    st.header("Dashboard")
+    st.header("📊 Dashboard")
     
     # Load all data for dashboard
     all_customers = load_customers()
@@ -976,18 +452,18 @@ with tab1:
         customer_transactions = load_transactions("customer", customer_id)
         if customer_transactions:
             customer_balance = calculate_balance(list(customer_transactions.values()))
-            if customer_balance > 0:  # Positive balance means customer owes money (receivable)
+            if customer_balance > 0:
                 total_receivable += customer_balance
-            else:  # Negative balance means we owe customer (payable)
+            else:
                 total_payable -= customer_balance
     
     for supplier_id, supplier in all_suppliers.items():
         supplier_transactions = load_transactions("supplier", supplier_id)
         if supplier_transactions:
             supplier_balance = calculate_balance(list(supplier_transactions.values()))
-            if supplier_balance < 0:  # Negative balance means we owe supplier (payable)
+            if supplier_balance < 0:
                 total_payable -= supplier_balance
-            else:  # Positive balance means supplier owes us (receivable)
+            else:
                 total_receivable += supplier_balance
     
     # Display metrics
@@ -995,27 +471,27 @@ with tab1:
     
     with col1:
         st.markdown(f"""
-        <div class="metric-card" style="background-color: #E3F2FD;">
-            <div class="metric-value">{format_currency(total_receivable)}</div>
+        <div class="metric-card" style="background-color: #1E1E1E; border: 1px solid #4CAF50;">
+            <div class="metric-value" style="color: #4CAF50;">{format_currency(total_receivable)}</div>
             <div class="metric-label">You Get (Total Receivable)</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col2:
         st.markdown(f"""
-        <div class="metric-card" style="background-color: #FFEBEE;">
-            <div class="metric-value">{format_currency(total_payable)}</div>
+        <div class="metric-card" style="background-color: #1E1E1E; border: 1px solid #F44336;">
+            <div class="metric-value" style="color: #F44336;">{format_currency(total_payable)}</div>
             <div class="metric-label">You Give (Total Payable)</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col3:
         net_balance = total_receivable - total_payable
-        background_color = "#E8F5E9" if net_balance >= 0 else "#FFEBEE"
+        color = "#4CAF50" if net_balance >= 0 else "#F44336"
         
         st.markdown(f"""
-        <div class="metric-card" style="background-color: {background_color};">
-            <div class="metric-value">{format_currency(net_balance)}</div>
+        <div class="metric-card" style="background-color: #1E1E1E; border: 1px solid {color};">
+            <div class="metric-value" style="color: {color};">{format_currency(net_balance)}</div>
             <div class="metric-label">Net Balance</div>
         </div>
         """, unsafe_allow_html=True)
@@ -1025,22 +501,22 @@ with tab1:
     
     with col1:
         st.markdown(f"""
-        <div class="metric-card" style="background-color: #F3E5F5;">
-            <div class="metric-value">{len(all_customers)}</div>
+        <div class="metric-card" style="background-color: #1E1E1E; border: 1px solid #BB86FC;">
+            <div class="metric-value" style="color: #BB86FC;">{len(all_customers)}</div>
             <div class="metric-label">Total Customers</div>
         </div>
         """, unsafe_allow_html=True)
     
     with col2:
         st.markdown(f"""
-        <div class="metric-card" style="background-color: #FFF3E0;">
-            <div class="metric-value">{len(all_suppliers)}</div>
+        <div class="metric-card" style="background-color: #1E1E1E; border: 1px solid #FF9800;">
+            <div class="metric-value" style="color: #FF9800;">{len(all_suppliers)}</div>
             <div class="metric-label">Total Suppliers</div>
         </div>
         """, unsafe_allow_html=True)
     
     # Recent transactions
-    st.subheader("Recent Transactions")
+    st.subheader("📋 Recent Transactions")
     
     # Combine all transactions
     all_transactions = []
@@ -1090,107 +566,94 @@ with tab1:
         df = pd.DataFrame(df_transactions)
         st.dataframe(df, use_container_width=True)
         
-        # Action for selected transaction
-        if st.button("View Transaction Details", key="view_recent_trans"):
-            if len(recent_transactions) > 0:
-                selected_trans = recent_transactions[0]
-                entity_type = selected_trans.get('entity_type', '').lower()
-                entity_id = selected_trans.get('entity_id', '')
-                
-                if entity_type == 'customer':
-                    st.session_state.current_customer = entity_id
-                    st.rerun()
-                elif entity_type == 'supplier':
-                    st.session_state.current_supplier = entity_id
-                    st.rerun()
     else:
         st.info("No transactions found. Add your first transaction in the Customers or Suppliers tab.")
     
     # Financial charts
-    st.subheader("Financial Overview")
-    
-    # Prepare data for charts
-    monthly_data = {}
-    
-    for transaction in all_transactions:
-        try:
-            date_parts = transaction.get('date', '').split('-')
-            if len(date_parts) >= 2:
-                year_month = f"{date_parts[0]}-{date_parts[1]}"
-                
-                if year_month not in monthly_data:
-                    monthly_data[year_month] = {'debit': 0, 'credit': 0}
-                
-                debit = float(transaction.get('debit', 0))
-                credit = float(transaction.get('credit', 0))
-                
-                monthly_data[year_month]['debit'] += debit
-                monthly_data[year_month]['credit'] += credit
-        except:
-            pass
-    
-    # Create DataFrame for chart
-    chart_data = []
-    for month, values in monthly_data.items():
-        chart_data.append({
-            'Month': month,
-            'Debit': values['debit'],
-            'Credit': values['credit'],
-            'Net': values['credit'] - values['debit']
-        })
-    
-    chart_df = pd.DataFrame(chart_data)
-    
-    if not chart_df.empty:
-        # Sort by month
-        chart_df = chart_df.sort_values('Month')
+    if all_transactions:
+        st.subheader("📈 Financial Overview")
         
-        # Create charts
-        col1, col2 = st.columns(2)
+        # Prepare data for charts
+        monthly_data = {}
         
-        with col1:
-            # Line chart for debit and credit
-            fig = px.line(
-                chart_df, 
-                x='Month', 
-                y=['Debit', 'Credit'],
-                title='Monthly Debit and Credit',
-                labels={'value': 'Amount', 'variable': 'Type'},
-                color_discrete_map={'Debit': '#FF6B6B', 'Credit': '#4CAF50'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        for transaction in all_transactions:
+            try:
+                date_parts = transaction.get('date', '').split('-')
+                if len(date_parts) >= 2:
+                    year_month = f"{date_parts[0]}-{date_parts[1]}"
+                    
+                    if year_month not in monthly_data:
+                        monthly_data[year_month] = {'debit': 0, 'credit': 0}
+                    
+                    debit = float(transaction.get('debit', 0))
+                    credit = float(transaction.get('credit', 0))
+                    
+                    monthly_data[year_month]['debit'] += debit
+                    monthly_data[year_month]['credit'] += credit
+            except:
+                pass
         
-        with col2:
-            # Bar chart for net balance
-            fig = px.bar(
-                chart_df,
-                x='Month',
-                y='Net',
-                title='Monthly Net Balance',
-                labels={'Net': 'Net Balance'},
-                color='Net',
-                color_continuous_scale=['#FF6B6B', '#FFFFFF', '#4CAF50'],
-                color_continuous_midpoint=0
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        # Create DataFrame for chart
+        chart_data = []
+        for month, values in monthly_data.items():
+            chart_data.append({
+                'Month': month,
+                'Debit': values['debit'],
+                'Credit': values['credit'],
+                'Net': values['credit'] - values['debit']
+            })
         
-        # Pie chart for receivables vs payables
-        fig = px.pie(
-            names=['Receivable', 'Payable'],
-            values=[total_receivable, total_payable],
-            title='Receivables vs Payables',
-            color_discrete_sequence=['#4CAF50', '#FF6B6B']
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No transaction data available for charts.")
+        chart_df = pd.DataFrame(chart_data)
+        
+        if not chart_df.empty:
+            # Sort by month
+            chart_df = chart_df.sort_values('Month')
+            
+            # Create charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Line chart for debit and credit
+                fig = px.line(
+                    chart_df, 
+                    x='Month', 
+                    y=['Debit', 'Credit'],
+                    title='Monthly Debit and Credit',
+                    labels={'value': 'Amount', 'variable': 'Type'},
+                    color_discrete_map={'Debit': '#FF6B6B', 'Credit': '#4CAF50'}
+                )
+                fig.update_layout(
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font_color='white'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Bar chart for net balance
+                fig = px.bar(
+                    chart_df,
+                    x='Month',
+                    y='Net',
+                    title='Monthly Net Balance',
+                    labels={'Net': 'Net Balance'},
+                    color='Net',
+                    color_continuous_scale=['#FF6B6B', '#FFFFFF', '#4CAF50'],
+                    color_continuous_midpoint=0
+                )
+                fig.update_layout(
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font_color='white'
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
 # Customers Tab
 with tab2:
-    st.header("Customers")
+    st.header("👥 Customers")
     
     # Add new customer form
-    with st.expander("Add New Customer", expanded=False):
+    with st.expander("➕ Add New Customer", expanded=False):
         with st.form("add_customer_form"):
             col1, col2 = st.columns(2)
             
@@ -1229,7 +692,6 @@ with tab2:
                         
                         if save_customer(customer_id, customer_data):
                             st.success(f"Customer {new_name} added successfully!")
-                            # Clear form fields by rerunning
                             st.rerun()
     
     # Search and filter customers
@@ -1239,7 +701,7 @@ with tab2:
         st.info("No customers found. Add your first customer using the form above.")
     else:
         # Search box
-        search_query = st.text_input("Search customers by name or phone", "")
+        search_query = st.text_input("🔍 Search customers by name or phone", "")
         
         # Filter customers based on search query
         filtered_customers = {}
@@ -1296,15 +758,15 @@ with tab2:
         
         if customer:
             # Customer profile section
-            st.subheader(f"Customer Profile: {customer.get('name', 'Unknown')}")
+            st.subheader(f"👤 Customer Profile: {customer.get('name', 'Unknown')}")
             
             col1, col2, col3 = st.columns([2, 2, 1])
             
             with col1:
-                st.write(f"**Phone:** {customer.get('phone', 'N/A')}")
-                st.write(f"**Email:** {customer.get('email', 'N/A')}")
-                st.write(f"**Address:** {customer.get('address', 'N/A')}")
-                st.write(f"**Customer since:** {format_date(customer.get('created_on', 'N/A'))}")
+                st.write(f"**📞 Phone:** {customer.get('phone', 'N/A')}")
+                st.write(f"**📧 Email:** {customer.get('email', 'N/A')}")
+                st.write(f"**📍 Address:** {customer.get('address', 'N/A')}")
+                st.write(f"**📅 Customer since:** {format_date(customer.get('created_on', 'N/A'))}")
             
             with col2:
                 # Load transactions
@@ -1314,7 +776,6 @@ with tab2:
                 balance = 0
                 if transactions:
                     balance = calculate_balance(list(transactions.values()))
-                
                 # Display balance
                 balance_color = "#F44336" if balance > 0 else "#4CAF50" if balance < 0 else "#FFC107"
                 st.markdown(f"""
@@ -1326,16 +787,16 @@ with tab2:
             
             with col3:
                 # Action buttons
-                if st.button("Edit Customer", key=f"edit_customer_{customer_id}"):
+                if st.button("✏️ Edit Customer", key=f"edit_customer_{customer_id}"):
                     st.session_state.edit_customer = customer_id
                 
-                if st.button("Delete Customer", key=f"delete_customer_{customer_id}"):
+                if st.button("🗑️ Delete Customer", key=f"delete_customer_{customer_id}"):
                     st.session_state.confirm_delete_customer = customer_id
             
             # Edit customer form
             if st.session_state.edit_customer == customer_id:
                 with st.form(f"edit_customer_form_{customer_id}"):
-                    st.subheader("Edit Customer")
+                    st.subheader("✏️ Edit Customer")
                     
                     col1, col2 = st.columns(2)
                     
@@ -1389,7 +850,7 @@ with tab2:
             
             # Confirm delete dialog
             if st.session_state.confirm_delete_customer == customer_id:
-                st.warning(f"Are you sure you want to delete customer '{customer.get('name', 'Unknown')}'? This will also delete all transactions.")
+                st.warning(f"⚠️ Are you sure you want to delete customer '{customer.get('name', 'Unknown')}'? This will also delete all transactions.")
                 
                 col1, col2 = st.columns(2)
                 
@@ -1407,23 +868,19 @@ with tab2:
                         st.rerun()
             
             # Customer ledger section
-            st.subheader("Ledger Book")
+            st.subheader("📖 Ledger Book")
             
             # Add new transaction
-            with st.expander("Add New Transaction", expanded=False):
+            with st.expander("➕ Add New Transaction", expanded=False):
                 with st.form(f"add_customer_transaction_form_{customer_id}"):
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        # Use DateEntry component for automatic date formatting
-                        st.markdown('<div class="date-input">', unsafe_allow_html=True)
-                        date_entry = DateEntry(
-                            label="Date (YYYY-MM-DD)*",
-                            key=f"customer_date_input_{customer_id}",
-                            value=datetime.datetime.now().strftime('%Y-%m-%d')
+                        date_input = st.date_input(
+                            "Date*",
+                            value=datetime.datetime.now().date(),
+                            key=f"customer_date_input_{customer_id}"
                         )
-                        date_input = date_entry.render()
-                        st.markdown('</div>', unsafe_allow_html=True)
                         
                         particular = st.text_area(
                             "Particulars*", 
@@ -1436,7 +893,7 @@ with tab2:
                             "Debit Amount", 
                             min_value=0.0, 
                             format="%.2f",
-                            help="Amount to be added to customer's account (customer gives money)",
+                            help="Amount customer pays (reduces their debt)",
                             key=f"customer_debit_{customer_id}"
                         )
                         
@@ -1444,23 +901,21 @@ with tab2:
                             "Credit Amount", 
                             min_value=0.0, 
                             format="%.2f",
-                            help="Amount to be subtracted from customer's account (customer takes money/goods)",
+                            help="Amount customer owes (increases their debt)",
                             key=f"customer_credit_{customer_id}"
                         )
                     
                     transaction_submitted = st.form_submit_button("Add Transaction")
                     
                     if transaction_submitted:
-                        if not validate_date(date_input):
-                            st.error("Please enter a valid date in YYYY-MM-DD format!")
-                        elif not particular:
+                        if not particular:
                             st.error("Particulars are required!")
                         elif debit == 0 and credit == 0:
                             st.error("Either Debit or Credit amount must be greater than zero!")
                         else:
                             transaction_id = str(uuid.uuid4())
                             transaction_data = {
-                                'date': date_input,
+                                'date': str(date_input),
                                 'particular': particular,
                                 'debit': str(debit),
                                 'credit': str(credit)
@@ -1492,7 +947,7 @@ with tab2:
                 for transaction in transactions_list:
                     debit = float(transaction.get('debit', 0))
                     credit = float(transaction.get('credit', 0))
-                    running_balance += debit - credit
+                    running_balance += credit - debit
                     total_debit += debit
                     total_credit += credit
                     
@@ -1519,7 +974,7 @@ with tab2:
                 st.dataframe(df.set_index("ID"), use_container_width=True)
                 
                 # Export to Excel
-                if st.button("Export Ledger to Excel", key=f"export_customer_{customer_id}"):
+                if st.button("📥 Export Ledger to Excel", key=f"export_customer_{customer_id}"):
                     # Create a more detailed DataFrame for export
                     export_df = pd.DataFrame([
                         {
@@ -1534,7 +989,7 @@ with tab2:
                     balance = 0
                     balances = []
                     for _, row in export_df.iterrows():
-                        balance += row['Debit'] - row['Credit']
+                        balance += row['Credit'] - row['Debit']
                         balances.append(balance)
                     
                     export_df['Balance'] = balances
@@ -1547,51 +1002,37 @@ with tab2:
                         balance
                     ]
                     
-                    # Add customer information at the top
-                    customer_info = pd.DataFrame({
-                        'Customer Information': ['Name:', 'Phone:', 'Email:', 'Address:', 'Created On:'],
-                        'Value': [
-                            customer.get('name', ''),
-                            customer.get('phone', ''),
-                            customer.get('email', ''),
-                            customer.get('address', ''),
-                            customer.get('created_on', '')
-                        ]
-                    })
-                    
                     # Save to Excel using Streamlit download button
                     filename = f"customer_ledger_{customer.get('name', 'unknown').replace(' ', '_')}.xlsx"
                     save_excel_file(export_df, filename)
                 
-                #
-
-
                 # Transaction actions
-                st.subheader("Transaction Actions")
+                st.subheader("⚙️ Transaction Actions")
                 
-                selected_transaction_id = st.selectbox(
-                    "Select transaction",
-                    options=[t.get('id', '') for t in transactions_list if t.get('id', '')],
-                    format_func=lambda x: next((f"{t.get('date', '')} - {t.get('particular', '')}" for t in transactions_list if t.get('id', '') == x), ""),
-                    key="customer_transaction_select"
-                )
-                
-                if selected_transaction_id:
-                    col1, col2 = st.columns(2)
+                if len(transactions_list) > 0:
+                    selected_transaction_id = st.selectbox(
+                        "Select transaction",
+                        options=[t.get('id', '') for t in transactions_list if t.get('id', '')],
+                        format_func=lambda x: next((f"{t.get('date', '')} - {t.get('particular', '')}" for t in transactions_list if t.get('id', '') == x), ""),
+                        key="customer_transaction_select"
+                    )
                     
-                    with col1:
-                        if st.button("Edit Transaction", key=f"edit_customer_trans_{selected_transaction_id}"):
-                            st.session_state.edit_transaction = {
-                                'id': selected_transaction_id,
-                                'entity_type': 'customer',
-                                'entity_id': customer_id
-                            }
-                    
-                    with col2:
-                        if st.button("Delete Transaction", key=f"delete_customer_trans_{selected_transaction_id}"):
-                            if delete_transaction("customer", customer_id, selected_transaction_id):
-                                st.success("Transaction deleted successfully!")
-                                st.rerun()
+                    if selected_transaction_id:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if st.button("✏️ Edit Transaction", key=f"edit_customer_trans_{selected_transaction_id}"):
+                                st.session_state.edit_transaction = {
+                                    'id': selected_transaction_id,
+                                    'entity_type': 'customer',
+                                    'entity_id': customer_id
+                                }
+                        
+                        with col2:
+                            if st.button("🗑️ Delete Transaction", key=f"delete_customer_trans_{selected_transaction_id}"):
+                                if delete_transaction("customer", customer_id, selected_transaction_id):
+                                    st.success("Transaction deleted successfully!")
+                                    st.rerun()
             
             # Edit transaction form
             if (st.session_state.edit_transaction and 
@@ -1603,20 +1044,21 @@ with tab2:
                 
                 if transaction:
                     with st.form(f"edit_customer_transaction_form_{transaction_id}"):
-                        st.subheader("Edit Transaction")
+                        st.subheader("✏️ Edit Transaction")
                         
                         col1, col2 = st.columns(2)
                         
                         with col1:
-                            # Use DateEntry component for automatic date formatting
-                            st.markdown('<div class="date-input">', unsafe_allow_html=True)
-                            date_entry = DateEntry(
-                                label="Date (YYYY-MM-DD)*",
-                                key=f"edit_customer_date_{transaction_id}",
-                                value=transaction.get('date', '')
+                            try:
+                                current_date = datetime.datetime.strptime(transaction.get('date', ''), '%Y-%m-%d').date()
+                            except:
+                                current_date = datetime.datetime.now().date()
+                            
+                            edit_date = st.date_input(
+                                "Date*",
+                                value=current_date,
+                                key=f"edit_customer_date_{transaction_id}"
                             )
-                            edit_date = date_entry.render()
-                            st.markdown('</div>', unsafe_allow_html=True)
                             
                             edit_particular = st.text_area(
                                 "Particulars*", 
@@ -1631,7 +1073,7 @@ with tab2:
                                 min_value=0.0, 
                                 value=float(transaction.get('debit', 0)),
                                 format="%.2f",
-                                help="Amount to be added to customer's account (customer gives money)",
+                                help="Amount customer pays (reduces their debt)",
                                 key=f"edit_customer_debit_{transaction_id}"
                             )
                             
@@ -1640,7 +1082,7 @@ with tab2:
                                 min_value=0.0, 
                                 value=float(transaction.get('credit', 0)),
                                 format="%.2f",
-                                help="Amount to be subtracted from customer's account (customer takes money/goods)",
+                                help="Amount customer owes (increases their debt)",
                                 key=f"edit_customer_credit_{transaction_id}"
                             )
                         
@@ -1653,15 +1095,13 @@ with tab2:
                             cancel_trans = st.form_submit_button("Cancel")
                         
                         if update_trans_submitted:
-                            if not validate_date(edit_date):
-                                st.error("Please enter a valid date in YYYY-MM-DD format!")
-                            elif not edit_particular:
+                            if not edit_particular:
                                 st.error("Particulars are required!")
                             elif edit_debit == 0 and edit_credit == 0:
                                 st.error("Either Debit or Credit amount must be greater than zero!")
                             else:
                                 updated_transaction = {
-                                    'date': edit_date,
+                                    'date': str(edit_date),
                                     'particular': edit_particular,
                                     'debit': str(edit_debit),
                                     'credit': str(edit_credit)
@@ -1678,10 +1118,10 @@ with tab2:
 
 # Suppliers Tab
 with tab3:
-    st.header("Suppliers")
+    st.header("🏢 Suppliers")
     
     # Add new supplier form
-    with st.expander("Add New Supplier", expanded=False):
+    with st.expander("➕ Add New Supplier", expanded=False):
         with st.form("add_supplier_form"):
             col1, col2 = st.columns(2)
             
@@ -1720,7 +1160,6 @@ with tab3:
                         
                         if save_supplier(supplier_id, supplier_data):
                             st.success(f"Supplier {new_name} added successfully!")
-                            # Clear form fields by rerunning
                             st.rerun()
     
     # Search and filter suppliers
@@ -1730,7 +1169,7 @@ with tab3:
         st.info("No suppliers found. Add your first supplier using the form above.")
     else:
         # Search box
-        search_query = st.text_input("Search suppliers by name or phone", "", key="supplier_search")
+        search_query = st.text_input("🔍 Search suppliers by name or phone", "", key="supplier_search")
         
         # Filter suppliers based on search query
         filtered_suppliers = {}
@@ -1788,15 +1227,15 @@ with tab3:
         
         if supplier:
             # Supplier profile section
-            st.subheader(f"Supplier Profile: {supplier.get('name', 'Unknown')}")
+            st.subheader(f"🏢 Supplier Profile: {supplier.get('name', 'Unknown')}")
             
             col1, col2, col3 = st.columns([2, 2, 1])
             
             with col1:
-                st.write(f"**Phone:** {supplier.get('phone', 'N/A')}")
-                st.write(f"**Email:** {supplier.get('email', 'N/A')}")
-                st.write(f"**Address:** {supplier.get('address', 'N/A')}")
-                st.write(f"**Supplier since:** {format_date(supplier.get('created_on', 'N/A'))}")
+                st.write(f"**📞 Phone:** {supplier.get('phone', 'N/A')}")
+                st.write(f"**📧 Email:** {supplier.get('email', 'N/A')}")
+                st.write(f"**📍 Address:** {supplier.get('address', 'N/A')}")
+                st.write(f"**📅 Supplier since:** {format_date(supplier.get('created_on', 'N/A'))}")
             
             with col2:
                 # Load transactions
@@ -1818,16 +1257,16 @@ with tab3:
             
             with col3:
                 # Action buttons
-                if st.button("Edit Supplier", key=f"edit_supplier_{supplier_id}"):
+                if st.button("✏️ Edit Supplier", key=f"edit_supplier_{supplier_id}"):
                     st.session_state.edit_supplier = supplier_id
                 
-                if st.button("Delete Supplier", key=f"delete_supplier_{supplier_id}"):
+                if st.button("🗑️ Delete Supplier", key=f"delete_supplier_{supplier_id}"):
                     st.session_state.confirm_delete_supplier = supplier_id
             
             # Edit supplier form
             if st.session_state.edit_supplier == supplier_id:
                 with st.form(f"edit_supplier_form_{supplier_id}"):
-                    st.subheader("Edit Supplier")
+                    st.subheader("✏️ Edit Supplier")
                     
                     col1, col2 = st.columns(2)
                     
@@ -1881,7 +1320,7 @@ with tab3:
             
             # Confirm delete dialog
             if st.session_state.confirm_delete_supplier == supplier_id:
-                st.warning(f"Are you sure you want to delete supplier '{supplier.get('name', 'Unknown')}'? This will also delete all transactions.")
+                st.warning(f"⚠️ Are you sure you want to delete supplier '{supplier.get('name', 'Unknown')}'? This will also delete all transactions.")
                 
                 col1, col2 = st.columns(2)
                 
@@ -1899,35 +1338,32 @@ with tab3:
                         st.rerun()
             
             # Supplier ledger section
-            st.subheader("Ledger Book")
+            st.subheader("📖 Ledger Book")
             
             # Add new transaction
-            with st.expander("Add New Transaction", expanded=False):
+            with st.expander("➕ Add New Transaction", expanded=False):
                 with st.form(f"add_supplier_transaction_form_{supplier_id}"):
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        # Use DateEntry component for automatic date formatting
-                        st.markdown('<div class="date-input">', unsafe_allow_html=True)
-                        date_entry = DateEntry(
-                            label="Date (YYYY-MM-DD)*",
-                            key=f"supplier_date_input_{supplier_id}",
-                            value=datetime.datetime.now().strftime('%Y-%m-%d')
+                        date_input = st.date_input(
+                            "Date*",
+                            value=datetime.datetime.now().date(),
+                            key=f"supplier_date_input_{supplier_id}"
                         )
-                        date_input = date_entry.render()
-                        st.markdown('</div>', unsafe_allow_html=True)
                         
                         particular = st.text_area(
                             "Particulars*", 
                             help="Description of the transaction",
                             key=f"supplier_particular_{supplier_id}"
                         )
+                    
                     with col2:
                         debit = st.number_input(
                             "Debit Amount", 
                             min_value=0.0, 
                             format="%.2f",
-                            help="Amount to be added to supplier's account (you give money to supplier)",
+                            help="Amount you pay to supplier",
                             key=f"supplier_debit_{supplier_id}"
                         )
                         
@@ -1935,23 +1371,21 @@ with tab3:
                             "Credit Amount", 
                             min_value=0.0, 
                             format="%.2f",
-                            help="Amount to be subtracted from supplier's account (you get goods/money from supplier)",
+                            help="Amount you owe to supplier",
                             key=f"supplier_credit_{supplier_id}"
                         )
                     
                     transaction_submitted = st.form_submit_button("Add Transaction")
                     
                     if transaction_submitted:
-                        if not validate_date(date_input):
-                            st.error("Please enter a valid date in YYYY-MM-DD format!")
-                        elif not particular:
+                        if not particular:
                             st.error("Particulars are required!")
                         elif debit == 0 and credit == 0:
                             st.error("Either Debit or Credit amount must be greater than zero!")
                         else:
                             transaction_id = str(uuid.uuid4())
                             transaction_data = {
-                                'date': date_input,
+                                'date': str(date_input),
                                 'particular': particular,
                                 'debit': str(debit),
                                 'credit': str(credit)
@@ -1983,7 +1417,7 @@ with tab3:
                 for transaction in transactions_list:
                     debit = float(transaction.get('debit', 0))
                     credit = float(transaction.get('credit', 0))
-                    running_balance += credit - debit  # For suppliers, credit increases balance, debit decreases
+                    running_balance += credit - debit
                     total_debit += debit
                     total_credit += credit
                     
@@ -2010,7 +1444,7 @@ with tab3:
                 st.dataframe(df.set_index("ID"), use_container_width=True)
                 
                 # Export to Excel
-                if st.button("Export Ledger to Excel", key=f"export_supplier_{supplier_id}"):
+                if st.button("📥 Export Ledger to Excel", key=f"export_supplier_{supplier_id}"):
                     # Create a more detailed DataFrame for export
                     export_df = pd.DataFrame([
                         {
@@ -2025,7 +1459,7 @@ with tab3:
                     balance = 0
                     balances = []
                     for _, row in export_df.iterrows():
-                        balance += row['Credit'] - row['Debit']  # For suppliers
+                        balance += row['Credit'] - row['Debit']
                         balances.append(balance)
                     
                     export_df['Balance'] = balances
@@ -2038,48 +1472,36 @@ with tab3:
                         balance
                     ]
                     
-                    # Add supplier information at the top
-                    supplier_info = pd.DataFrame({
-                        'Supplier Information': ['Name:', 'Phone:', 'Email:', 'Address:', 'Created On:'],
-                        'Value': [
-                            supplier.get('name', ''),
-                            supplier.get('phone', ''),
-                            supplier.get('email', ''),
-                            supplier.get('address', ''),
-                            supplier.get('created_on', '')
-                        ]
-                    })
-                    
                     # Save to Excel using Streamlit download button
                     filename = f"supplier_ledger_{supplier.get('name', 'unknown').replace(' ', '_')}.xlsx"
                     save_excel_file(export_df, filename)
                 
                 # Transaction actions
-                st.subheader("Transaction Actions")
+                st.subheader("⚙️ Transaction Actions")
                 
-                selected_transaction_id = st.selectbox(
-                    "Select transaction",
-                    options=[t.get('id', '') for t in transactions_list if t.get('id', '')],
-                    format_func=lambda x: next((f"{t.get('date', '')} - {t.get('particular', '')}" for t in transactions_list if t.get('id', '') == x), ""),
-                    key="supplier_transaction_select"
-                )
-                
-                if selected_transaction_id:
-                    col1, col2 = st.columns(2)
+                if len(transactions_list) > 0:
+                    selected_transaction_id = st.selectbox(
+                        "Select transaction",
+                        options=[t.get('id', '') for t in transactions_list if t.get('id', '')],
+                        format_func=lambda x: next((f"{t.get('date', '')} - {t.get('particular', '')}" for t in transactions_list if t.get('id', '') == x), ""),
+                        key="supplier_transaction_select"
+                    )
                     
-                    with col1:
-                        if st.button("Edit Transaction", key=f"edit_supplier_trans_{selected_transaction_id}"):
-                            st.session_state.edit_transaction = {
-                                'id': selected_transaction_id,
-                                'entity_type': 'supplier',
-                                'entity_id': supplier_id
-                            }
-                    
-                    with col2:
-                        if st.button("Delete Transaction", key=f"delete_supplier_trans_{selected_transaction_id}"):
-                            if delete_transaction("supplier", supplier_id, selected_transaction_id):
-                                st.success("Transaction deleted successfully!")
-                                st.rerun()
+                    if selected_transaction_id:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            if st.button("✏️ Edit Transaction", key=f"edit_supplier_trans_{selected_transaction_id}"):
+                                st.session_state.edit_transaction = {
+                                    'id': selected_transaction_id,
+                                    'entity_type': 'supplier',
+                                    'entity_id': supplier_id
+                                }
+                        with col2:
+                            if st.button("🗑️ Delete Transaction", key=f"delete_supplier_trans_{selected_transaction_id}"):
+                                if delete_transaction("supplier", supplier_id, selected_transaction_id):
+                                    st.success("Transaction deleted successfully!")
+                                    st.rerun()
             
             # Edit transaction form
             if (st.session_state.edit_transaction and 
@@ -2091,20 +1513,21 @@ with tab3:
                 
                 if transaction:
                     with st.form(f"edit_supplier_transaction_form_{transaction_id}"):
-                        st.subheader("Edit Transaction")
+                        st.subheader("✏️ Edit Transaction")
                         
                         col1, col2 = st.columns(2)
                         
                         with col1:
-                            # Use DateEntry component for automatic date formatting
-                            st.markdown('<div class="date-input">', unsafe_allow_html=True)
-                            date_entry = DateEntry(
-                                label="Date (YYYY-MM-DD)*",
-                                key=f"edit_supplier_date_{transaction_id}",
-                                value=transaction.get('date', '')
+                            try:
+                                current_date = datetime.datetime.strptime(transaction.get('date', ''), '%Y-%m-%d').date()
+                            except:
+                                current_date = datetime.datetime.now().date()
+                            
+                            edit_date = st.date_input(
+                                "Date*",
+                                value=current_date,
+                                key=f"edit_supplier_date_{transaction_id}"
                             )
-                            edit_date = date_entry.render()
-                            st.markdown('</div>', unsafe_allow_html=True)
                             
                             edit_particular = st.text_area(
                                 "Particulars*", 
@@ -2119,7 +1542,7 @@ with tab3:
                                 min_value=0.0, 
                                 value=float(transaction.get('debit', 0)),
                                 format="%.2f",
-                                help="Amount to be added to supplier's account (you give money to supplier)",
+                                help="Amount you pay to supplier",
                                 key=f"edit_supplier_debit_{transaction_id}"
                             )
                             
@@ -2128,7 +1551,7 @@ with tab3:
                                 min_value=0.0, 
                                 value=float(transaction.get('credit', 0)),
                                 format="%.2f",
-                                help="Amount to be subtracted from supplier's account (you get goods/money from supplier)",
+                                help="Amount you owe to supplier",
                                 key=f"edit_supplier_credit_{transaction_id}"
                             )
                         
@@ -2141,15 +1564,13 @@ with tab3:
                             cancel_trans = st.form_submit_button("Cancel")
                         
                         if update_trans_submitted:
-                            if not validate_date(edit_date):
-                                st.error("Please enter a valid date in YYYY-MM-DD format!")
-                            elif not edit_particular:
+                            if not edit_particular:
                                 st.error("Particulars are required!")
                             elif edit_debit == 0 and edit_credit == 0:
                                 st.error("Either Debit or Credit amount must be greater than zero!")
                             else:
                                 updated_transaction = {
-                                    'date': edit_date,
+                                    'date': str(edit_date),
                                     'particular': edit_particular,
                                     'debit': str(edit_debit),
                                     'credit': str(edit_credit)
@@ -2166,14 +1587,14 @@ with tab3:
 
 # Settings Tab
 with tab4:
-    st.header("Settings")
+    st.header("⚙️ Settings")
     
     # Create tabs for different settings categories
-    settings_tab1, settings_tab2, settings_tab3 = st.tabs(["General", "Appearance", "Data Management"])
+    settings_tab1, settings_tab2, settings_tab3 = st.tabs(["🔧 General", "🎨 Appearance", "💾 Data Management"])
     
     # General Settings
     with settings_tab1:
-        st.subheader("General Settings")
+        st.subheader("🔧 General Settings")
         
         with st.form("general_settings_form"):
             currency_symbol = st.text_input(
@@ -2199,12 +1620,6 @@ with tab4:
                 )
             )
             
-            auto_date_format = st.checkbox(
-                "Auto-format dates while typing",
-                value=st.session_state.settings.get("auto_date_format", True),
-                help="Automatically add separators while typing dates"
-            )
-            
             auto_calculate_balance = st.checkbox(
                 "Auto-calculate balance",
                 value=st.session_state.settings.get("auto_calculate_balance", True),
@@ -2217,14 +1632,13 @@ with tab4:
                 help="Show success/error notifications"
             )
             
-            submitted = st.form_submit_button("Save General Settings")
+            submitted = st.form_submit_button("💾 Save General Settings")
             
             if submitted:
                 # Update settings
                 st.session_state.settings.update({
                     "currency_symbol": currency_symbol,
                     "date_format": date_format,
-                    "auto_date_format": auto_date_format,
                     "auto_calculate_balance": auto_calculate_balance,
                     "notification_enabled": notification_enabled
                 })
@@ -2234,21 +1648,19 @@ with tab4:
                     st.success("General settings saved successfully!")
     
     # Appearance Settings
-# Appearance Settings
     with settings_tab2:
-        st.subheader("Appearance Settings")
-        st.info("Dark theme is now the default and only theme for this application.")
-
+        st.subheader("🎨 Appearance Settings")
+        st.info("🌙 Dark theme is currently active and provides the best user experience.")
         
         with st.form("appearance_settings_form"):
             theme = st.radio(
                 "Application Theme",
-                options=["light", "dark"],
-                index=0 if st.session_state.settings.get("theme", "light") == "light" else 1,
-                help="Choose between light or dark theme"
+                options=["dark", "light"],
+                index=0 if st.session_state.settings.get("theme", "dark") == "dark" else 1,
+                help="Choose between dark or light theme"
             )
             
-            submitted = st.form_submit_button("Save Appearance Settings")
+            submitted = st.form_submit_button("💾 Save Appearance Settings")
             
             if submitted:
                 # Update settings
@@ -2257,34 +1669,17 @@ with tab4:
                 # Save to storage
                 if save_settings(st.session_state.settings):
                     st.success("Appearance settings saved successfully!")
-                    # Apply theme immediately
-                    apply_theme()
                     st.rerun()
-
     
     # Data Management Settings
     with settings_tab3:
-        st.subheader("Data Management")
-        
-        # Firebase integration settings
-        st.write("### Cloud Storage")
-        
-        enable_firebase = st.checkbox(
-            "Enable Firebase Integration",
-            value=st.session_state.get('enable_firebase', False),
-            help="Store data in Firebase cloud database"
-        )
-        
-        if enable_firebase:
-            st.warning("Firebase configuration is not set up. Please configure Firebase settings first.")
-        
-        st.session_state['enable_firebase'] = enable_firebase
+        st.subheader("💾 Data Management")
         
         # Backup data
-        st.write("### Backup Data")
+        st.write("### 📤 Backup Data")
         st.write("Create a backup of all your data that you can restore later.")
         
-        if st.button("Create Backup"):
+        if st.button("📤 Create Backup"):
             try:
                 # Load all data
                 all_customers = load_customers()
@@ -2296,7 +1691,9 @@ with tab4:
                     "suppliers": all_suppliers,
                     "settings": st.session_state.settings,
                     "customer_transactions": {},
-                    "supplier_transactions": {}
+                    "supplier_transactions": {},
+                    "backup_date": datetime.datetime.now().isoformat(),
+                    "version": "1.0"
                 }
                 
                 # Add transactions
@@ -2309,25 +1706,29 @@ with tab4:
                 # Convert to JSON
                 backup_json = json.dumps(backup_data, indent=2)
                 
-                # Create download link
-                b64 = base64.b64encode(backup_json.encode()).decode()
+                # Create download button
                 filename = f"ledger_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                href = f'<a href="data:application/json;base64,{b64}" download="{filename}">Download Backup File</a>'
                 
-                st.markdown(href, unsafe_allow_html=True)
-                st.success("Backup created successfully! Click the link above to download.")
+                st.download_button(
+                    label="📥 Download Backup File",
+                    data=backup_json,
+                    file_name=filename,
+                    mime="application/json"
+                )
+                
+                st.success("✅ Backup created successfully! Click the button above to download.")
             except Exception as e:
-                st.error(f"Error creating backup: {e}")
+                st.error(f"❌ Error creating backup: {e}")
         
         # Restore data
-        st.write("### Restore Data")
+        st.write("### 📥 Restore Data")
         st.write("Restore data from a previously created backup file.")
-        st.warning("This will overwrite your current data. Make sure to create a backup first.")
+        st.warning("⚠️ This will overwrite your current data. Make sure to create a backup first.")
         
-        uploaded_file = st.file_uploader("Upload backup file", type=["json"])
+        uploaded_file = st.file_uploader("📁 Upload backup file", type=["json"])
         
         if uploaded_file is not None:
-            if st.button("Restore Data"):
+            if st.button("📥 Restore Data"):
                 try:
                     # Load backup data
                     backup_data = json.loads(uploaded_file.getvalue().decode())
@@ -2335,7 +1736,7 @@ with tab4:
                     # Validate backup data structure
                     required_keys = ["customers", "suppliers", "settings", "customer_transactions", "supplier_transactions"]
                     if not all(key in backup_data for key in required_keys):
-                        st.error("Invalid backup file format. Missing required data.")
+                        st.error("❌ Invalid backup file format. Missing required data.")
                         st.stop()
                     
                     # Restore settings
@@ -2360,78 +1761,92 @@ with tab4:
                             for trans_id, transaction in backup_data["supplier_transactions"][supplier_id].items():
                                 save_transaction("supplier", supplier_id, trans_id, transaction)
                     
-                    st.success("Data restored successfully!")
+                    st.success("✅ Data restored successfully!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error restoring data: {e}")
+                    st.error(f"❌ Error restoring data: {e}")
         
         # Reset data
-        st.write("### Reset Data")
+        st.write("### 🗑️ Reset Data")
         st.write("Reset all data to start fresh. This will delete all customers, suppliers, and transactions.")
-        st.error("This action cannot be undone. Make sure to create a backup first.")
+        st.error("⚠️ This action cannot be undone. Make sure to create a backup first.")
         
-        if st.button("Reset All Data"):
-            confirm = st.text_input("Type 'CONFIRM' to reset all data")
+        reset_confirm = st.text_input("Type 'CONFIRM' to reset all data", key="reset_confirm")
+        
+        if st.button("🗑️ Reset All Data") and reset_confirm == "CONFIRM":
+            try:
+                # Reset local data
+                if os.path.exists(DATA_DIR):
+                    import shutil
+                    shutil.rmtree(DATA_DIR)
+                    os.makedirs(DATA_DIR, exist_ok=True)
+                    os.makedirs(CUSTOMER_TRANSACTIONS_DIR, exist_ok=True)
+                    os.makedirs(SUPPLIER_TRANSACTIONS_DIR, exist_ok=True)
+                
+                # Reset session state
+                st.session_state.current_customer = None
+                st.session_state.current_supplier = None
+                st.session_state.edit_customer = None
+                st.session_state.edit_supplier = None
+                st.session_state.edit_transaction = None
+                st.session_state.confirm_delete_customer = None
+                st.session_state.confirm_delete_supplier = None
+                
+                st.success("✅ All data has been reset successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error resetting data: {e}")
+        
+        # Data statistics
+        st.write("### 📊 Data Statistics")
+        try:
+            customers_count = len(load_customers())
+            suppliers_count = len(load_suppliers())
             
-            if confirm == "CONFIRM":
-                try:
-
-
-
-
-
-
-
-                    # Reset local data
-                    if os.path.exists(DATA_DIR):
-                        import shutil
-                        shutil.rmtree(DATA_DIR)
-                        os.makedirs(DATA_DIR, exist_ok=True)
-                        os.makedirs(CUSTOMER_TRANSACTIONS_DIR, exist_ok=True)
-                        os.makedirs(SUPPLIER_TRANSACTIONS_DIR, exist_ok=True)
-                    
-                    # Keep settings but reset session state
-                    st.session_state.current_customer = None
-                    st.session_state.current_supplier = None
-                    
-                    st.success("All data has been reset successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error resetting data: {e}")
-
-# DateEntry component for automatic date formatting
-class DateEntry:
-    def __init__(self, label, key, value=""):
-        self.label = label
-        self.key = key
-        self.value = value
-    
-    def render(self):
-        date_input = st.text_input(
-            self.label,
-            value=self.value,
-            key=self.key
-        )
-        
-        # Format date as user types if auto-format is enabled
-        if st.session_state.settings.get("auto_date_format", True):
-            date_input = format_date_input(date_input)
-        
-        return date_input
+            # Count total transactions
+            total_customer_transactions = 0
+            total_supplier_transactions = 0
+            
+            for customer_id in load_customers():
+                customer_trans = load_transactions("customer", customer_id)
+                total_customer_transactions += len(customer_trans)
+            
+            for supplier_id in load_suppliers():
+                supplier_trans = load_transactions("supplier", supplier_id)
+                total_supplier_transactions += len(supplier_trans)
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("👥 Customers", customers_count)
+            
+            with col2:
+                st.metric("🏢 Suppliers", suppliers_count)
+            
+            with col3:
+                st.metric("📝 Customer Transactions", total_customer_transactions)
+            
+            with col4:
+                st.metric("📝 Supplier Transactions", total_supplier_transactions)
+                
+        except Exception as e:
+            st.error(f"Error loading statistics: {e}")
 
 # Add a footer
+st.markdown("---")
 st.markdown("""
----
-<div style="text-align: center; color: #888;">
-    <p>Ledger Management System | Version 1.0</p>
-    <p>© 2023 All Rights Reserved</p>
+<div style="text-align: center; color: #888; padding: 20px;">
+    <p><strong>📒 Ledger Management System</strong> | Version 2.0</p>
+    <p>💾 Local Storage | 🌙 Dark Theme | 📱 Responsive Design</p>
+    <p>© 2024 All Rights Reserved</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Auto-refresh data periodically if enabled
-if st.session_state.settings.get("auto_save_interval", 5) > 0:
-    current_time = time.time()
-    if current_time - st.session_state.last_refresh > st.session_state.settings.get("auto_save_interval", 5) * 60:
-        st.session_state.last_refresh = current_time
-        # This will trigger a rerun to refresh data
-        st.rerun()
+# Auto-save notification
+if st.session_state.settings.get("notification_enabled", True):
+    # Show a small notification about auto-save
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("💡 **Tips:**")
+    st.sidebar.markdown("• Data is automatically saved")
+    st.sidebar.markdown("• Use backup feature regularly")
+    st.sidebar.markdown("• Export ledgers to Excel")
