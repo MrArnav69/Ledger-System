@@ -25,27 +25,41 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize Firebase with the provided credentials
-# Initialize Firebase with credentials from environment variable
+# Initialize Firebase with credentials from Streamlit secrets
 try:
     if not firebase_admin._apps:
-        cred_path = "ledger-system-22ef6-firebase-adminsdk-fbsvc-695bef6eb3.json"  # Make sure this file is in the same directory
-        if os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
+        # Check if running on Streamlit Cloud (secrets available)
+        if hasattr(st, 'secrets') and 'firebase' in st.secrets:
+            # Use Streamlit secrets
+            firebase_config = dict(st.secrets["firebase"])
+            cred = credentials.Certificate(firebase_config)
             firebase_admin.initialize_app(cred, {
                 'databaseURL': 'https://ledger-system-22ef6-default-rtdb.asia-southeast1.firebasedatabase.app/'
             })
             using_firebase = True
             firebase_db = db.reference('/')
+            st.sidebar.success("Connected to Firebase via Streamlit Secrets")
         else:
-            st.sidebar.warning("Firebase credentials file not found. Using local storage.")
-            using_firebase = False
+            # Fallback to local file for development
+            cred_path = "ledger-system-22ef6-firebase-adminsdk-fbsvc-695bef6eb3.json"
+            if os.path.exists(cred_path):
+                cred = credentials.Certificate(cred_path)
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': 'https://ledger-system-22ef6-default-rtdb.asia-southeast1.firebasedatabase.app/'
+                })
+                using_firebase = True
+                firebase_db = db.reference('/')
+                st.sidebar.info("Connected to Firebase via local credentials")
+            else:
+                st.sidebar.warning("Firebase credentials not found. Using local storage.")
+                using_firebase = False
     else:
         using_firebase = True
         firebase_db = db.reference('/')
 except Exception as e:
     st.sidebar.error(f"Firebase initialization error: {e}")
     using_firebase = False
+
 # File paths for local storage
 DATA_DIR = "data"
 CUSTOMERS_FILE = os.path.join(DATA_DIR, "customers.json")
